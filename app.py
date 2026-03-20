@@ -31,8 +31,8 @@ uploaded_file = st.file_uploader(
     type=["html", "htm"],
 )
 
-default_start = date.today()
-default_end = default_start
+default_start = date(2026, 3, 28)
+default_end = date(2026, 6, 4)
 
 col1, col2 = st.columns(2)
 with col1:
