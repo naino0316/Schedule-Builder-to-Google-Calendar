@@ -47,6 +47,15 @@ class CourseRecord:
     title: str
     description: str
     meetings: tuple[MeetingRecord, ...]
+    final_exam: "FinalExamRecord | None"
+
+
+@dataclass(frozen=True)
+class FinalExamRecord:
+    exam_date: date
+    start_time: str
+    end_time: str
+    location: str
 
 
 @dataclass(frozen=True)
@@ -100,6 +109,7 @@ def parse_course_record(html_text: str, course_id: str) -> CourseRecord:
     title = extract_string_field(course_object, "TITLE")
     description = extract_string_field(course_object, "DESCRIPTION")
     meetings = parse_meetings(course_object)
+    final_exam = parse_final_exam(course_object)
     return CourseRecord(
         course_id=course_id,
         subject_code=subject_code,
@@ -108,6 +118,7 @@ def parse_course_record(html_text: str, course_id: str) -> CourseRecord:
         title=title,
         description=description,
         meetings=tuple(meetings),
+        final_exam=final_exam,
     )
 
 
@@ -189,6 +200,40 @@ def format_24_hour_time(hour: int, minute: int) -> str:
     return f"{hour:02d}:{minute:02d}"
 
 
+def add_hours_to_time(hour: int, minute: int, hours_to_add: int) -> str:
+    total_minutes = hour * 60 + minute + (hours_to_add * 60)
+    end_hour = (total_minutes // 60) % 24
+    end_minute = total_minutes % 60
+    return format_24_hour_time(end_hour, end_minute)
+
+
+def parse_final_exam(course_object: str) -> FinalExamRecord | None:
+    match = re.search(
+        r'"FINAL_EXAM_STARTDATE":(new Date\((\d+),(\d+),(\d+),(\d+),(\d+),(\d+)\)|null)',
+        course_object,
+    )
+    if not match or match.group(1) == "null":
+        return None
+
+    exam_date = date(
+        int(match.group(2)),
+        int(match.group(3)) + 1,
+        int(match.group(4)),
+    )
+    start_hour = int(match.group(5))
+    start_minute = int(match.group(6))
+    start_time = format_24_hour_time(start_hour, start_minute)
+    end_time = add_hours_to_time(start_hour, start_minute, 2)
+    location = ""
+
+    return FinalExamRecord(
+        exam_date=exam_date,
+        start_time=start_time,
+        end_time=end_time,
+        location=location,
+    )
+
+
 def decode_js_string(value: str) -> str:
     return (
         value.replace(r"\/", "/")
@@ -204,6 +249,7 @@ def build_csv_rows(
     courses: list[CourseRecord],
     start_date: date,
     end_date: date,
+    include_final_exams: bool = False,
 ) -> tuple[list[CsvRow], list[str]]:
     csv_rows: list[CsvRow] = []
     skipped_messages: list[str] = []
@@ -241,6 +287,27 @@ def build_csv_rows(
                 f"Skipped all meetings for {course.title}: no schedulable meeting times found."
             )
 
+        if include_final_exams:
+            if course.final_exam is None:
+                skipped_messages.append(
+                    f"Skipped final exam for {course.title}: no final exam time listed."
+                )
+            else:
+                csv_rows.append(
+                    CsvRow(
+                        subject=(
+                            f"{course.subject_code} {course.course_number} "
+                            f"{course.section_number} (Final Exam)"
+                        ),
+                        start_date=course.final_exam.exam_date.strftime("%m/%d/%Y"),
+                        start_time=course.final_exam.start_time,
+                        end_date=course.final_exam.exam_date.strftime("%m/%d/%Y"),
+                        end_time=course.final_exam.end_time,
+                        description=course.title,
+                        location=course.final_exam.location,
+                    )
+                )
+
     return csv_rows, skipped_messages
 
 
@@ -277,9 +344,12 @@ def rows_to_csv_bytes(rows: list[CsvRow]) -> bytes:
 def convert_html_to_csv(
     html_text: str,
     start_date: date,
-    end_date: date,
+    end_date: date | None = None,
+    repeat_events: bool = True,
+    include_final_exams: bool = False,
 ) -> ConversionResult:
-    if end_date < start_date:
+    effective_end_date = end_date if repeat_events else start_date + timedelta(days=6)
+    if effective_end_date < start_date:
         raise ValueError("End date must be on or after the start date.")
 
     selected_course_ids = parse_selected_course_ids(html_text)
@@ -289,5 +359,10 @@ def convert_html_to_csv(
         )
 
     courses = [parse_course_record(html_text, course_id) for course_id in selected_course_ids]
-    rows, skipped_messages = build_csv_rows(courses, start_date, end_date)
+    rows, skipped_messages = build_csv_rows(
+        courses,
+        start_date,
+        effective_end_date,
+        include_final_exams=include_final_exams,
+    )
     return ConversionResult(rows=tuple(rows), skipped_messages=tuple(skipped_messages))
